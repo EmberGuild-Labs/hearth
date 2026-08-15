@@ -1,0 +1,6 @@
+{
+  "network": false,
+  "filesystem": ["read:./data", "write:./out"],
+  "env_read": ["HOME", "TZ"],
+  "max_memory_mb": 512
+}

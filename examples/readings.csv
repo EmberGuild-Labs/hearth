@@ -1,0 +1,5 @@
+station,distance (m),elapsed (s),sample_id,verified
+north,1200,48,0071,true
+ridge,3400,150,0072,true
+saddle,,95,0073,false
+summit,5100,240,0074,true

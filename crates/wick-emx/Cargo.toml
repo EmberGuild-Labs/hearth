@@ -1,0 +1,12 @@
+[package]
+name = "wick-emx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The .emx plugin: typed, unit-aware tabular data"
+
+[dependencies]
+libwick.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+csv.workspace = true

@@ -1,0 +1,21 @@
+/target
+**/*.rs.bk
+.DS_Store
+
+# Converted files. The examples are inputs; their outputs are not.
+*.emt
+*.emd
+*.emi
+*.emc
+*.emx
+examples/*.pdf
+examples/back.*
+examples/one.pdf
+examples/two.pdf
+examples/scoped.emc
+examples/report.emd
+**/*.thumb.png
+
+# Signing keys never belong in a repository.
+*.key
+identity.key

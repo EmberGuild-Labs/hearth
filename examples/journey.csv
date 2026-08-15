@@ -1,0 +1,5 @@
+leg,distance (km),elapsed (h),speed (km/h) = distance / elapsed
+approach,4.2,1.1,
+ridge,1.8,0.75,
+traverse,6.4,2.0,
+descent,5.0,0.9,

@@ -1,0 +1,10 @@
+[package]
+name = "wick-emt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The .emt plugin: plain text with enforced UTF-8 and semantic sectioning"
+
+[dependencies]
+libwick.workspace = true
+serde_json.workspace = true

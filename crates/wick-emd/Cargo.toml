@@ -1,0 +1,12 @@
+[package]
+name = "wick-emd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The .emd plugin: reflowable documents with optional pinned layout"
+
+[dependencies]
+libwick.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+flate2.workspace = true

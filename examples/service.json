@@ -1,0 +1,8 @@
+{
+  "name": "ridge-logger",
+  "listen": {"host": "0.0.0.0", "port": 8080},
+  "database": {"host": "db.internal", "port": 5432, "password": "hunter2"},
+  "features": ["telemetry", "retry"],
+  "plugins": [],
+  "debug": false
+}

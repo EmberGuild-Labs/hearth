@@ -1,0 +1,6 @@
+{
+  "network": false,
+  "filesystem": ["read:./data", "write:./out"],
+  "env_read": ["HOME"],
+  "max_memory_mb": 256
+}

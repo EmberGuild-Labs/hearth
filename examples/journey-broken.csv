@@ -1,0 +1,3 @@
+leg,distance (km),elapsed (min),speed (km) = distance + elapsed
+approach,4.2,66,
+ridge,1.8,45,

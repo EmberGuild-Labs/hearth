@@ -1,0 +1,13 @@
+[package]
+name = "wick-emc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The .emc plugin: self-validating, capability-scoped, split-trust config"
+
+[dependencies]
+libwick.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+serde_yaml_ng.workspace = true

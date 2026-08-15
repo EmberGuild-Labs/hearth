@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/libwick",
+    "crates/wick-emt",
+    "crates/wick-emc",
+    "crates/wick-emx",
+    "crates/wick-emi",
+    "crates/wick-emd",
+    "crates/hearth",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# chacha20poly1305 0.11 is edition 2024, which needs 1.85. Stated here so a
+# too-old toolchain fails with that sentence instead of a wall of parse errors.
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/EmberGuild-Labs/hearth"
+
+[workspace.dependencies]
+libwick = { path = "crates/libwick" }
+wick-emt = { path = "crates/wick-emt" }
+wick-emc = { path = "crates/wick-emc" }
+wick-emx = { path = "crates/wick-emx" }
+wick-emi = { path = "crates/wick-emi" }
+wick-emd = { path = "crates/wick-emd" }
+
+anyhow = "1"
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+zstd = "0.13"
+clap = { version = "4", features = ["derive"] }
+ed25519-dalek = "3"
+chacha20poly1305 = "0.11"
+argon2 = "0.5"
+getrandom = "0.3"
+toml = { version = "1", features = ["preserve_order"] }
+serde_yaml_ng = "0.10"
+csv = "1"
+png = "0.18"
+flate2 = "1"
+rpassword = "7"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

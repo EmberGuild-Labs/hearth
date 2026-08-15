@@ -1,0 +1,28 @@
+[package]
+name = "hearth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hearth: convert, view, diff, validate and migrate Ember files"
+
+[[bin]]
+name = "hearth"
+path = "src/main.rs"
+
+[dependencies]
+libwick.workspace = true
+wick-emt.workspace = true
+wick-emd.workspace = true
+wick-emi.workspace = true
+wick-emc.workspace = true
+wick-emx.workspace = true
+serde_json.workspace = true
+rpassword.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+png.workspace = true

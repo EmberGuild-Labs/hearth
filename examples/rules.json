@@ -1,0 +1,15 @@
+{
+  "spec": "1.0",
+  "rules": [
+    {
+      "from": 1,
+      "to": 2,
+      "note": "database moved under db, connection pooling added, debug retired",
+      "ops": [
+        {"op": "rename_key", "from": "database", "to": "db"},
+        {"op": "set_default", "path": "db.pool", "value": 10},
+        {"op": "drop_key", "path": "debug"}
+      ]
+    }
+  ]
+}
