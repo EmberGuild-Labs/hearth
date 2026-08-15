@@ -87,7 +87,12 @@ struct Hearth {
 
 /// The grid itself: an `NSTableView` over a [`TableData`], with every cell
 /// checked against its column's declared type before it is accepted.
-final class TableGrid: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+///
+/// A cell is committed from two places on purpose — the field's action and
+/// `controlTextDidEndEditing` — because between them they cover every way an
+/// edit can end, and missing one loses the edit silently. [`commit`] is
+/// idempotent, so being called twice for the same cell costs nothing.
+final class TableGrid: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     let scroll = NSScrollView()
     let table = NSTableView()
     private(set) var data = TableData()
@@ -183,6 +188,7 @@ final class TableGrid: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             field.cell?.usesSingleLineMode = true
             field.target = self
             field.action = #selector(commit(_:))
+            field.delegate = self
         }
         field.alignment = c.isNumeric ? .right : .left
         field.isEditable = !c.isComputed
@@ -192,10 +198,29 @@ final class TableGrid: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         return field
     }
 
+    /// Editing ended, however it ended — Tab, Return, a click in another
+    /// cell, or the window taking first responder back before a save.
+    ///
+    /// The field's action alone does not cover all of those, and an edit that
+    /// is not committed here is an edit the model never hears about: it stays
+    /// on screen looking saved until the next reload quietly replaces it with
+    /// the old value.
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField else { return }
+        commit(field)
+    }
+
     @objc private func commit(_ sender: NSTextField) {
         let row = table.row(for: sender)
         let col = table.column(for: sender)
-        guard row >= 0, row < data.rows.count, col >= 0, col < data.columns.count else { return }
+        guard row >= 0, row < data.rows.count, col >= 0, col < data.columns.count else {
+            // The field is no longer part of the table — it belonged to a
+            // reload that has already happened. Nothing can be stored against
+            // a row that is gone, but silence here is how an edit disappears
+            // without anyone being told.
+            onRefusal("that edit arrived after the table was reloaded and was not kept")
+            return
+        }
         let c = data.columns[col]
         let was = data.rows[row][col]
 
@@ -297,7 +322,12 @@ final class FileWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
 
         saveButton.target = self
         saveButton.action = #selector(save)
-        saveButton.keyEquivalent = "\r"
+        // Deliberately *not* the default button. Return belongs to whatever
+        // is being edited — in the grid it commits the cell, and a default
+        // button would take it first through `performKeyEquivalent`, saving
+        // the file while the cell the person just typed into was still
+        // uncommitted. ⌘S is in the File menu and does the same job without
+        // competing for a key the editor needs.
         saveButton.isEnabled = false
         revertButton.target = self
         revertButton.action = #selector(revert)
@@ -403,6 +433,11 @@ final class FileWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     /// what was typed at it — an importer may normalise, and hiding that
     /// would make the next diff a surprise.
     func reload() {
+        // Anything still being typed is ended here rather than left to fire
+        // against a table that is about to be replaced. Reverting discards it
+        // by definition; saving has already committed it.
+        window.makeFirstResponder(nil)
+
         let info = Hearth.run(["preview", url.path, "--text"])
         let lines = info.stdout.split(separator: "\n", omittingEmptySubsequences: false)
         heading.stringValue = lines.first.map(String.init) ?? url.lastPathComponent
@@ -534,7 +569,18 @@ final class FileWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
     // -- saving --------------------------------------------------------------
 
     @objc func save() {
-        guard !readOnly, window.isDocumentEdited else { return }
+        guard !readOnly else { return }
+
+        // Commit whatever is still being typed. A cell mid-edit has not
+        // reached the model yet, so saving first would write the table as it
+        // was before the last thing the person did — and then reload over the
+        // top of it, making the edit look deliberately discarded. Taking
+        // first responder back ends the edit and runs it through the same
+        // check every other cell goes through.
+        window.makeFirstResponder(nil)
+
+        // Asked after the commit above, which may be what made it dirty.
+        guard window.isDocumentEdited else { return }
 
         // Whichever view holds the edit writes the same dialect it was loaded
         // from, and `hearth edit --from` does the rest. Both routes end in one
