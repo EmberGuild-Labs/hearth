@@ -344,6 +344,75 @@ impl WickFile {
         Ok(())
     }
 
+    /// Forget a slot no chunk is sealed to any more, and drop `KEYS` with it
+    /// when it was the last one.
+    ///
+    /// A file that declares a key slot nothing uses invites the obvious wrong
+    /// conclusion — that something in it is still encrypted.
+    pub fn remove_key_slot(&mut self, slot: u8) -> Result<()> {
+        if self.chunks.iter().any(|c| c.enc.slot == slot) {
+            return Err(Error::Other(format!(
+                "slot {slot} still has chunks sealed to it"
+            )));
+        }
+        self.keys.remove_slot(slot);
+        if self.keys.slots().is_empty() {
+            self.chunks.remove(ChunkType::KEYS);
+        } else {
+            let c = Chunk::new(ChunkType::KEYS, serde_json::to_vec(self.keys.slots())?);
+            self.chunks.set(c);
+        }
+        Ok(())
+    }
+
+    /// Seal everything in the file that is *content* to `slot`, and report
+    /// what was sealed.
+    ///
+    /// Two chunks are deliberately left in the clear, and which two is the
+    /// whole design of this operation:
+    ///
+    /// * **`KEYS`** must stay plaintext. It holds the salt a passphrase is
+    ///   stretched against, so encrypting it would shut the key inside the
+    ///   lock it opens. §3 of the spec says the same thing.
+    /// * **`PROV`** stays readable so the chain can still be verified, and so
+    ///   a later write can extend it rather than starting a new one. The cost
+    ///   is that timestamps, actions and signing keys remain visible, which a
+    ///   caller is expected to say out loud rather than let a user assume
+    ///   otherwise.
+    ///
+    /// The header and the chunk table are structure, not content, and are
+    /// never encrypted: the format tag and the size of each chunk are visible
+    /// on any Wick file and always will be.
+    pub fn seal_payload(&mut self, slot: u8) -> Vec<ChunkType> {
+        self.reseal(slot, |c| {
+            c.enc.slot == 0 && !matches!(c.ty, ChunkType::KEYS | ChunkType::PROV)
+        })
+    }
+
+    /// The reverse: bring every chunk sealed to `slot` back into the clear.
+    ///
+    /// The caller must have unlocked `slot` first, or the values still hold
+    /// ciphertext and this would write it out as though it were plaintext.
+    pub fn unseal_payload(&mut self, slot: u8) -> Result<Vec<ChunkType>> {
+        if !self.keys.is_unlocked(slot) {
+            return Err(Error::NeedKey {
+                slot,
+                label: self.keys.label(slot),
+            });
+        }
+        Ok(self.reseal(0, |c| c.enc.slot == slot))
+    }
+
+    fn reseal(&mut self, to: u8, want: impl Fn(&Chunk) -> bool) -> Vec<ChunkType> {
+        let moving: Vec<Chunk> = self.chunks.iter().filter(|c| want(c)).cloned().collect();
+        let mut done = Vec::new();
+        for c in moving {
+            done.push(c.ty);
+            self.chunks.set(c.sealed_to(to));
+        }
+        done
+    }
+
     // ---- writing ---------------------------------------------------------
 
     /// Recompute the header's flags from what is actually present, so the

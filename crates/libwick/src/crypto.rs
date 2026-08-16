@@ -166,6 +166,13 @@ impl KeyRing {
         Ok(())
     }
 
+    /// Drop a slot and any key held for it. The caller is responsible for
+    /// having moved whatever was sealed to it somewhere else first.
+    pub fn remove_slot(&mut self, slot: u8) {
+        self.slots.retain(|s| s.slot != slot);
+        self.keys.remove(&slot);
+    }
+
     /// Unlock a slot the file already declares.
     pub fn unlock(&mut self, slot: u8, passphrase: &str) -> Result<()> {
         let s = self

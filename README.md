@@ -347,6 +347,8 @@ hearth info <file>                     header and chunk table, no payload read
 hearth formats                         what this build handles
 hearth key generate | show             the identity used for signing
 hearth rules show | set <file> <r>     read or attach migration rules
+hearth encrypt <file> [-o out]         lock a whole file behind a passphrase
+hearth decrypt <file> [-o out]         and open it again
 hearth seal <file> <paths...>          move config values into a key slot
 hearth seal <file> --all               seal the whole config, schema included
 hearth unseal <file> <paths...>        bring sealed values back out
@@ -435,6 +437,61 @@ An unsigned chain is reported as unsigned, never as valid. It is still
 tamper-evident; it just cannot say *who*.
 
 For CI, set `$HEARTH_KEY` to a hex secret key, or `$HEARTH_KEY_FILE` to a path.
+
+### Encrypting a whole file
+
+`hearth encrypt` locks every chunk of content in any of the five formats
+behind one passphrase, for a file you want to hand to somebody over a channel
+you do not trust:
+
+```sh
+hearth encrypt notes.emt -o to-send.emt     # keep the original, send the copy
+hearth decrypt to-send.emt                  # on the other end
+```
+
+XChaCha20-Poly1305 with an Argon2id-stretched passphrase — the same
+primitives [`seal`](#split-trust-config) uses, applied to the whole payload
+instead of named values. The passphrase is asked for twice when a human types
+it, `--passphrase-env VAR` supplies it in a script, and nothing anywhere
+recovers a file whose passphrase is lost.
+
+**What an encrypted file still tells anyone who has it:**
+
+```
+$ hearth info to-send.emt
+format:    MT (.emt, text)
+spec:      Wick v1.0
+flags:     0x0000000d  provenance, summary, encrypted
+chunks:
+  DATA       450 B  ...
+payload:   sealed to key slot 1
+provenance: 2 entries, 2 signed
+  latest: 2026-08-16T01:25:25Z — encrypted the payload to key slot 1 (payload)
+```
+
+That it is a Wick file, that it is a `.emt`, how many chunks it has and how
+big each one is, and its provenance chain — when it was edited, what was done
+and which key signed it. The contents are not readable, and neither are the
+schema and the summary tier, which would otherwise spell out the shape of a
+document nobody can open. If the *metadata* is the sensitive part, encryption
+of the container is not what you want; put the file inside something else.
+
+The extension is not a security measure and is not treated as one. What
+protects the file is the cipher and the passphrase — a format being unusual
+only means the person who intercepts it has to spend an afternoon on
+[docs/WICK.md](docs/WICK.md), which is public.
+
+Reading an encrypted file without the passphrase fails with what would help:
+
+```
+$ hearth view to-send.emt
+hearth: chunk is encrypted to key slot 1 (payload); no key supplied
+       this file is encrypted — `hearth decrypt` opens it for good, or pass
+       --unlock 1 to view, validate and get
+```
+
+Quick Look shows the same thing rather than an error, because a preview pane
+is not a place anybody can type a passphrase.
 
 ### Split-trust config
 

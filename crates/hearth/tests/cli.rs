@@ -1304,6 +1304,202 @@ fn a_whole_config_can_be_sealed_and_gives_up_only_its_format() {
     s.run(&["validate", "service.emc"]).ok().says("ok");
 }
 
+// ---------------------------------------------------------------------------
+// encrypt / decrypt
+// ---------------------------------------------------------------------------
+
+/// The whole promise of `hearth encrypt`: a file you can hand to somebody
+/// over a channel you do not trust, which gives up its contents to nobody
+/// without the passphrase and comes back exactly as it was with it.
+#[test]
+fn encrypting_a_file_hides_its_contents_and_gives_them_back() {
+    let s = Sandbox::new("encrypt");
+    s.write("notes.md", NOTES_MD);
+    s.run(&["convert", "notes.md"]).ok();
+
+    s.run_env(
+        &["encrypt", "notes.emt", "--passphrase-env", "PASS"],
+        "PASS",
+        "correct horse battery",
+    )
+    .ok()
+    .says("DATA")
+    .says("SCHM")
+    .says("SUMM");
+
+    // Not one byte of the prose survives in the clear — not in the payload,
+    // and not in the schema or the summary tier, which between them would
+    // otherwise spell out the outline of a document nobody can open.
+    let raw = std::fs::read(s.path("notes.emt")).unwrap();
+    for leaked in ["north ridge", "Field Notes", "instruments"] {
+        assert!(
+            !raw.windows(leaked.len()).any(|w| w == leaked.as_bytes()),
+            "an encrypted .emt still contains {leaked:?} in the clear"
+        );
+    }
+
+    // Reading it without the passphrase fails, and says what would help.
+    s.run(&["view", "notes.emt"])
+        .fails()
+        .says("encrypted to key slot 1")
+        .says("hearth decrypt");
+
+    // With it, everything is there again, byte for byte.
+    s.run_env(
+        &["decrypt", "notes.emt", "--passphrase-env", "PASS"],
+        "PASS",
+        "correct horse battery",
+    )
+    .ok();
+    s.run(&["convert", "notes.emt", "back.md"]).ok();
+    assert_eq!(s.read("notes.md"), s.read("back.md"));
+    s.run(&["validate", "notes.emt"]).ok().says("ok");
+}
+
+#[test]
+fn an_encrypted_file_previews_as_encrypted_rather_than_as_broken() {
+    // Quick Look is not a place anybody can type a passphrase, so the pane
+    // has to say what the file is. "No summary tier" would be a lie about a
+    // file whose summary tier is sitting right there, sealed.
+    let s = Sandbox::new("encrypt-preview");
+    std::fs::write(s.path("swatch.png"), gradient_png(40, 40)).unwrap();
+    s.run(&["convert", "swatch.png"]).ok();
+    s.run_env(
+        &["encrypt", "swatch.emi", "--passphrase-env", "PASS"],
+        "PASS",
+        "correct horse battery",
+    )
+    .ok();
+
+    s.run(&["preview", "swatch.emi", "--text"])
+        .ok()
+        .says("encrypted to key slot 1")
+        .says("hearth decrypt");
+    // And `info` still reports the shape of the file, because the header and
+    // the chunk table were never encrypted and the tool should not pretend.
+    s.run(&["info", "swatch.emi"])
+        .ok()
+        .says("encrypted")
+        .says("sealed to key slot 1");
+}
+
+#[test]
+fn a_wrong_passphrase_and_a_missing_one_are_different_answers() {
+    let s = Sandbox::new("encrypt-wrong");
+    s.write("notes.md", NOTES_MD);
+    s.run(&["convert", "notes.md"]).ok();
+    s.run_env(
+        &["encrypt", "notes.emt", "--passphrase-env", "PASS"],
+        "PASS",
+        "correct horse battery",
+    )
+    .ok();
+
+    s.run_env(
+        &["decrypt", "notes.emt", "--passphrase-env", "PASS"],
+        "PASS",
+        "not the passphrase",
+    )
+    .fails()
+    .says("wrong passphrase");
+
+    // Encrypting twice would leave a file whose two halves need two
+    // passphrases and no way to say so; refuse instead.
+    s.run_env(
+        &["encrypt", "notes.emt", "--passphrase-env", "PASS"],
+        "PASS",
+        "another passphrase",
+    )
+    .fails()
+    .says("already has chunks encrypted");
+
+    s.run(&["decrypt", "notes.emt"]).fails();
+}
+
+#[test]
+fn decrypting_leaves_no_trace_of_the_lock() {
+    // A file that still declared a key slot would read as "something in here
+    // is encrypted" to every tool that looked at it, including this one.
+    let s = Sandbox::new("encrypt-clean");
+    s.write("readings.csv", READINGS_CSV);
+    s.run(&["convert", "readings.csv"]).ok();
+    s.run(&["view", "readings.emx"]).ok();
+
+    let pass = "correct horse battery";
+    s.run_env(
+        &["encrypt", "readings.emx", "--passphrase-env", "PASS"],
+        "PASS",
+        pass,
+    )
+    .ok();
+    s.run_env(
+        &["decrypt", "readings.emx", "--passphrase-env", "PASS"],
+        "PASS",
+        pass,
+    )
+    .ok();
+    let info = s.run(&["info", "readings.emx"]).ok();
+    assert!(
+        !info.stdout.contains("KEYS"),
+        "a key slot outlived the lock"
+    );
+    let flags = info
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("flags:"))
+        .unwrap_or_default();
+    assert!(
+        !flags.contains("encrypted"),
+        "the encrypted flag outlived the lock: {flags}"
+    );
+    // The provenance line still says it happened, and should: the history is
+    // the one part of this that is meant to survive.
+    assert!(info.stdout.contains("decrypted the payload"));
+    s.run(&["decrypt", "readings.emx"])
+        .fails()
+        .says("is not encrypted");
+}
+
+#[test]
+fn an_encrypted_file_can_be_written_beside_the_original() {
+    // The sharing case: keep the file you work in, send the locked copy.
+    let s = Sandbox::new("encrypt-output");
+    s.write("service.json", SERVICE_JSON);
+    s.run(&["convert", "service.json"]).ok();
+    s.run_env(
+        &[
+            "encrypt",
+            "service.emc",
+            "-o",
+            "to-send.emc",
+            "--passphrase-env",
+            "PASS",
+        ],
+        "PASS",
+        "correct horse battery",
+    )
+    .ok();
+
+    s.run(&["view", "service.emc"]).ok().says("ridge-logger");
+    s.run(&["view", "to-send.emc"]).fails();
+}
+
+#[test]
+fn a_short_passphrase_is_refused_before_anything_is_written() {
+    let s = Sandbox::new("encrypt-short");
+    s.write("notes.md", NOTES_MD);
+    s.run(&["convert", "notes.md"]).ok();
+    s.run_env(
+        &["encrypt", "notes.emt", "--passphrase-env", "PASS"],
+        "PASS",
+        "short",
+    )
+    .fails()
+    .says("at least 8 characters");
+    // Untouched, not half-encrypted.
+    s.run(&["view", "notes.emt"]).ok().says("Field Notes");
+}
+
 #[test]
 fn unsealing_needs_the_right_passphrase_and_says_so() {
     let s = Sandbox::new("unseal-wrong");

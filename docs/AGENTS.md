@@ -130,6 +130,9 @@ lies.
 | `edit` on a file at another schema version | refused — an edit must not migrate a file as a side effect. `hearth migrate` first |
 | `set` a *new* path on a file with sealed values | refused unless `--force`, since the path may already exist inside the sealed half |
 | export a `.emc` whose secrets are sealed | refused — a config quietly missing its password is how a deployment breaks |
+| `encrypt` a file that already has an encrypted slot | refused — a file needing two passphrases with no way to say which is which. `decrypt` first, or use `seal` to add a second slot deliberately |
+| `decrypt` a file with more than one slot and no `--slot` | refused — guessing which half of a split-trust file to open is exactly the wrong guess |
+| any passphrase shorter than 8 characters | refused before anything is written |
 | `create` a `.emx` without `--columns`, or a `.emi` without `--size` | refused — the format cannot invent them |
 | an output name that contradicts `--to`/`--as` | refused rather than resolved by precedence |
 

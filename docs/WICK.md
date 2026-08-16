@@ -408,6 +408,26 @@ Tools built on this must refuse to *export* a payload that is silently missing
 sealed values. Writing a config with a quietly absent password is how a
 deployment breaks at three in the morning.
 
+### 6.2 Sealing a whole file
+
+Nothing above is specific to configuration. Sealing *every* content chunk to a
+single slot turns any Wick file into one that can be handed to somebody over a
+channel the sender does not trust — which is what `hearth encrypt` does.
+
+This is a convention rather than a new mechanism, and the convention is which
+two chunks stay in the clear:
+
+* **`KEYS` must not be encrypted.** It carries the salt the passphrase is
+  stretched against, so sealing it would shut the key inside the lock.
+* **`PROV` is left readable**, so the chain can still be verified and a later
+  write can extend it rather than starting a new one.
+
+Everything else — `DATA`, `SCHM`, `SUMM`, `CAPS`, `MIGR` — is content and may
+be sealed. A reader must state plainly what such a file still reveals: the
+header, the chunk table, and therefore the format, the number of chunks and
+the size of each. A Wick file is identifiable as one at a glance by design,
+and encryption does not change that.
+
 ---
 
 ## 7. Migration (`MIGR`)

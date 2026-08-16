@@ -259,7 +259,18 @@ impl Chunk {
     }
 
     /// Parse this chunk's value as a nested chunk list.
+    ///
+    /// A locked chunk's value is ciphertext, and ciphertext parses as a chunk
+    /// list the way any random bytes do — badly, and with an error about the
+    /// wrong thing. "Truncated" is what a reader used to be told about a
+    /// perfectly intact file it simply had no key for.
     pub fn as_list(&self, keys: &KeyRing) -> Result<ChunkList> {
+        if self.is_locked() {
+            return Err(Error::NeedKey {
+                slot: self.enc.slot,
+                label: keys.label(self.enc.slot),
+            });
+        }
         ChunkList::decode(&self.value, keys)
     }
 

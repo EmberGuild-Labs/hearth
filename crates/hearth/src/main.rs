@@ -75,6 +75,10 @@ enum Command {
     /// Read or attach a file's embedded migration rules.
     #[command(subcommand)]
     Rules(RulesCommand),
+    /// Encrypt a whole file behind a passphrase, whatever its format.
+    Encrypt(EncryptArgs),
+    /// Undo `hearth encrypt`, given the passphrase.
+    Decrypt(DecryptArgs),
     /// Move config values into an encrypted key slot (.emc).
     Seal(SealArgs),
     /// Bring sealed values back into the plaintext half (.emc).
@@ -297,6 +301,38 @@ struct MigrateArgs {
 }
 
 #[derive(Args)]
+struct EncryptArgs {
+    file: PathBuf,
+    /// Write the encrypted file here instead of over the original.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Key slot number.
+    #[arg(long, default_value_t = 1)]
+    slot: u8,
+    /// What this slot is for. Stored in the clear, so name the purpose, not
+    /// the passphrase.
+    #[arg(long, default_value = "payload")]
+    label: String,
+    /// Read the passphrase from this environment variable instead of asking.
+    #[arg(long, value_name = "VAR")]
+    passphrase_env: Option<String>,
+}
+
+#[derive(Args)]
+struct DecryptArgs {
+    file: PathBuf,
+    /// Write the decrypted file here instead of over the original.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Key slot to open. Only needed for a file with more than one.
+    #[arg(long)]
+    slot: Option<u8>,
+    /// Read the passphrase from this environment variable instead of asking.
+    #[arg(long, value_name = "VAR")]
+    passphrase_env: Option<String>,
+}
+
+#[derive(Args)]
 struct SealArgs {
     file: PathBuf,
     /// Dotted config paths to seal. A prefix takes everything beneath it.
@@ -400,6 +436,16 @@ fn main() {
     restore_sigpipe();
     if let Err(e) = run() {
         eprintln!("hearth: {e:#}");
+        // The one failure with an obvious next step. Somebody handed an
+        // encrypted file has no reason to know which flag opens it, and
+        // "no key supplied" on its own does not tell them.
+        if let Some(libwick::Error::NeedKey { slot, .. }) = e.chain().find_map(|c| c.downcast_ref())
+        {
+            eprintln!(
+                "       this file is encrypted — `hearth decrypt` opens it for good, \
+                 or pass --unlock {slot} to view, validate and get"
+            );
+        }
         std::process::exit(1);
     }
 }
@@ -442,6 +488,8 @@ fn run() -> Result<()> {
         Command::Formats(a) => cmd_formats(&reg, a),
         Command::Key(k) => cmd_key(k),
         Command::Rules(r) => cmd_rules(&ctx, r),
+        Command::Encrypt(a) => cmd_encrypt(&ctx, a),
+        Command::Decrypt(a) => cmd_decrypt(&ctx, a),
         Command::Seal(a) => cmd_seal(&ctx, a),
         Command::Unseal(a) => cmd_unseal(&ctx, a),
         Command::Get(a) => cmd_get(a),
@@ -1975,6 +2023,150 @@ fn cmd_rules(ctx: &Ctx, r: RulesCommand) -> Result<()> {
 // ---------------------------------------------------------------------------
 // format-specific commands
 // ---------------------------------------------------------------------------
+
+/// Ask for a passphrase the way a thing being locked deserves: twice when a
+/// human is typing, once when a script supplies it, and never shorter than
+/// the only thing standing between the file and whoever has it.
+fn new_passphrase(what: &str, env_var: Option<&str>) -> Result<String> {
+    let pass = read_passphrase(&format!("passphrase for {what}: "), env_var)?;
+    if env_var.is_none() && std::io::stdin().is_terminal() {
+        let again = read_passphrase("repeat: ", None)?;
+        if pass != again {
+            bail!("passphrases do not match");
+        }
+    }
+    if pass.chars().count() < 8 {
+        bail!(
+            "use at least 8 characters — this is the only thing standing between \
+             the file and anyone who has it"
+        );
+    }
+    Ok(pass)
+}
+
+/// Encrypt every chunk of content in a file, whatever format it is.
+///
+/// `seal` is the `.emc` operation: it takes named values out of a config and
+/// locks those, leaving the rest of the file readable, which is the point of
+/// split trust. This is the other thing people want, and until now there was
+/// no way to ask for it: lock the *whole* payload of any of the five formats
+/// so the file can be handed to someone over a channel you do not trust.
+///
+/// What it cannot do is hide that the file exists or what kind of file it is.
+/// The header and chunk table stay readable by design — a Wick file is
+/// identifiable as one at a glance, forever — so this says so plainly rather
+/// than letting the extension imply more privacy than it has.
+fn cmd_encrypt(ctx: &Ctx, a: EncryptArgs) -> Result<()> {
+    let mut file =
+        WickFile::read(&a.file).with_context(|| format!("reading {}", a.file.display()))?;
+
+    if let Some(slot) = file.locked_slots().first() {
+        bail!(
+            "{} already has chunks encrypted to slot {slot} ({}); \
+             `hearth decrypt` it first, or use `hearth seal` to add a second slot",
+            a.file.display(),
+            file.keys.label(*slot)
+        );
+    }
+
+    let pass = new_passphrase(
+        &format!("slot {} ({})", a.slot, a.label),
+        a.passphrase_env.as_deref(),
+    )?;
+
+    file.add_key_slot(a.slot, &a.label, &pass)?;
+    let sealed = file.seal_payload(a.slot);
+    if sealed.is_empty() {
+        bail!("{} has nothing in it to encrypt", a.file.display());
+    }
+
+    let out = a.output.unwrap_or_else(|| a.file.clone());
+    file.record(
+        TOOL,
+        &format!("encrypted the payload to key slot {} ({})", a.slot, a.label),
+        identity::load()?.as_ref(),
+    )?;
+    file.write(&out)?;
+
+    println!(
+        "{}  encrypted to slot {} ({})",
+        out.display(),
+        a.slot,
+        a.label
+    );
+    println!(
+        "  sealed: {}",
+        sealed
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    // Say exactly what an interceptor still gets. A tool that lets someone
+    // believe "encrypted" means "invisible" has misled them about the one
+    // thing they were relying on it for.
+    ctx.note(
+        "still readable without the passphrase: that this is a Wick file, which format, \
+         how big each chunk is, and the provenance chain — timestamps, what was done, and \
+         which key signed it. The contents are not.",
+    );
+    ctx.note("nothing can recover this file if the passphrase is lost. There is no second way in.");
+    Ok(())
+}
+
+fn cmd_decrypt(ctx: &Ctx, a: DecryptArgs) -> Result<()> {
+    let mut file =
+        WickFile::read(&a.file).with_context(|| format!("reading {}", a.file.display()))?;
+
+    let locked = file.locked_slots();
+    let slot = match (a.slot, locked.as_slice()) {
+        (Some(s), _) => s,
+        (None, [only]) => *only,
+        (None, []) => bail!("{} is not encrypted", a.file.display()),
+        // Two slots is split trust, and guessing which half the caller meant
+        // is exactly the guess that would unseal the wrong one.
+        (None, many) => bail!(
+            "{} has {} encrypted slots ({}); say which with --slot",
+            a.file.display(),
+            many.len(),
+            many.iter()
+                .map(|s| format!("{s} {}", file.keys.label(*s)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+
+    let pass = read_passphrase(
+        &format!("passphrase for slot {slot} ({}): ", file.keys.label(slot)),
+        a.passphrase_env.as_deref(),
+    )?;
+    file.unlock(slot, &pass)
+        .with_context(|| format!("unlocking slot {slot}"))?;
+
+    let label = file.keys.label(slot);
+    let opened = file.unseal_payload(slot)?;
+    file.remove_key_slot(slot)?;
+
+    let out = a.output.unwrap_or_else(|| a.file.clone());
+    file.record(
+        TOOL,
+        &format!("decrypted the payload from key slot {slot} ({label})"),
+        identity::load()?.as_ref(),
+    )?;
+    file.write(&out)?;
+
+    println!("{}  decrypted from slot {slot} ({label})", out.display());
+    println!(
+        "  opened: {}",
+        opened
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    ctx.note("the file is plaintext again; anyone who can read it can read all of it");
+    Ok(())
+}
 
 fn cmd_seal(ctx: &Ctx, a: SealArgs) -> Result<()> {
     let (tag, _) = libwick::sniff_path(&a.file)

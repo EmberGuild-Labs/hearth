@@ -190,8 +190,34 @@ fn gather(
     // summary tier should not first decompress the table.
     let file = WickFile::read_partial(path, |taken| plugin.enough(taken, &render))?;
 
+    // An encrypted file previews as a statement that it is encrypted. It has
+    // to preview as *something*: Quick Look is not a place a person can pass
+    // a passphrase, and a pane reading "file has no SUMM chunk" over a file
+    // that plainly has one, sealed, is the confusion between "missing" and
+    // "encrypted" that the rest of this codebase works to keep apart.
+    let sealed = file
+        .sealed_slot(ChunkType::DATA)
+        .or_else(|| file.sealed_slot(ChunkType::SUMM));
+
     let mut body = Vec::new();
-    plugin.render(&file, &render, &mut body)?;
+    match sealed {
+        Some(slot) => {
+            let label = file.keys.label(slot);
+            body.extend_from_slice(
+                format!(
+                    "encrypted to key slot {slot} ({label})\n\n\
+                     The payload, its schema and its summary tier are sealed. What is\n\
+                     above and below this — the format, the size of each chunk and the\n\
+                     provenance chain — is all this file gives up without the\n\
+                     passphrase.\n\n\
+                     `hearth decrypt` opens it.\n"
+                )
+                .as_bytes(),
+            );
+            note = Some(format!("sealed to key slot {slot} ({label})"));
+        }
+        None => plugin.render(&file, &render, &mut body)?,
+    }
 
     let provenance = {
         let chain = file.chain()?;
@@ -209,7 +235,7 @@ fn gather(
     // The image formats have an actual picture to show, and a preview pane
     // that showed a paragraph about an image instead of the image would be a
     // strange thing to build.
-    let image = if want_picture && plugin.tag() == wick_emi::TAG {
+    let image = if want_picture && sealed.is_none() && plugin.tag() == wick_emi::TAG {
         picture(&file, path)?
     } else {
         None
