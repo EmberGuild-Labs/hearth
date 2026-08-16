@@ -1581,18 +1581,43 @@ fn a_preview_reads_the_summary_tier_and_says_which_tier_it_read() {
 #[test]
 fn a_preview_of_an_image_carries_the_picture_with_it() {
     // A Quick Look pane is sandboxed and cannot fetch anything, so the
-    // thumbnail has to be in the page itself.
+    // picture has to be in the page itself.
     let s = Sandbox::new("preview-emi");
     std::fs::write(s.path("swatch.png"), gradient_png(80, 50)).unwrap();
     s.run(&["convert", "swatch.png"]).ok();
     let html = s.run(&["preview", "swatch.emi"]).ok();
     assert!(
         html.stdout.contains("src=\"data:image/png;base64,"),
-        "no embedded thumbnail"
+        "no embedded picture"
     );
     assert!(
         !html.stdout.contains("http://") && !html.stdout.contains("https://"),
         "the preview references something it cannot reach"
+    );
+}
+
+#[test]
+fn a_preview_shows_the_image_rather_than_stretching_its_thumbnail() {
+    // The summary thumbnail is 128px on its long edge. Embedding that alone
+    // and letting an 800pt pane stretch it is what made a converted image
+    // look worse than the PNG it came from, so a preview of an image this
+    // size draws every pixel of it, at its own size.
+    let s = Sandbox::new("preview-sharp");
+    std::fs::write(s.path("wide.png"), gradient_png(400, 300)).unwrap();
+    s.run(&["convert", "wide.png"]).ok();
+    let html = s.run(&["preview", "wide.emi"]).ok();
+    assert!(
+        html.stdout.contains("width=\"400\" height=\"300\""),
+        "the picture is not at its natural size"
+    );
+    assert!(
+        html.stdout.contains("400×300, drawn from the payload"),
+        "the page does not say where the picture came from"
+    );
+    // And having decoded it, the page stops claiming it did not.
+    assert!(
+        !html.stdout.contains("the payload was never decoded"),
+        "the tier line contradicts the picture above it"
     );
 }
 

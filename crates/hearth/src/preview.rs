@@ -4,8 +4,10 @@
 //! file" and expects an answer in milliseconds, for a file it may never
 //! open; that is the summary tier's job description, written by somebody
 //! else. So the preview reads `SUMM` and renders from it, and only decodes
-//! the payload when asked to (`--full`) or when a file carries no summary at
-//! all.
+//! the payload when asked to (`--full`), when a file carries no summary at
+//! all, or — for an image — to draw the picture itself, which is the one
+//! answer to "what is in this file" that a summary cannot give at the size
+//! a pane wants it. See [`picture`].
 //!
 //! The HTML is one file with no external references — no fonts, no scripts,
 //! no images fetched over the network — because a Quick Look extension is
@@ -25,6 +27,37 @@ pub struct Opts {
     pub width: usize,
 }
 
+/// Longest edge, in pixels, of the picture embedded in an HTML preview.
+///
+/// A Quick Look pane is around 800pt wide, which is 1600 device pixels on
+/// every Mac sold this decade. 1600 is therefore the point past which more
+/// pixels buy nothing but base64.
+const DISPLAY_MAX: u32 = 1600;
+
+/// How large an image the preview will decode to show it properly. Past
+/// this, the summary thumbnail is used and the page says so — a preview is
+/// supposed to be the cheap way to look at a file, and holding 100 megapixels
+/// of RGBA to draw a two-inch pane is not that.
+const DECODE_BUDGET_PIXELS: u64 = 40_000_000;
+
+/// The picture an image preview shows, and where it came from.
+struct Picture {
+    png: Vec<u8>,
+    /// Natural size of `png`, which is what it is displayed at.
+    width: u32,
+    height: u32,
+    /// Integer factor to draw it at. Only ever above 1 for images small
+    /// enough that native size would be a postage stamp, and integer so that
+    /// enlarging a 16px icon stays crisp instead of being interpolated.
+    zoom: u32,
+    /// Said under the picture, because "this is a 128px thumbnail of a 4000px
+    /// photograph" is the difference between a blurry preview and an honest
+    /// one.
+    caption: String,
+    /// True when the pixels came from `DATA` rather than from `SUMM`.
+    decoded: bool,
+}
+
 /// What a preview is made of, gathered once and then written out as either
 /// HTML or text.
 struct Preview {
@@ -39,14 +72,99 @@ struct Preview {
     /// True when the body came from `SUMM` rather than from `DATA`.
     tiered: bool,
     body: String,
-    /// PNG bytes for formats that have a picture to show for themselves.
-    image: Option<Vec<u8>>,
+    /// The picture, for formats that have one to show for themselves.
+    image: Option<Picture>,
     provenance: Option<String>,
     /// Why the body is not what was asked for, when it is not.
     note: Option<String>,
 }
 
-fn gather(plugin: &dyn Plugin, path: &Path, opts: &Opts) -> anyhow::Result<Preview> {
+/// Pick the picture for an `.emi` preview: the raster itself where that is
+/// affordable, the summary thumbnail where it is not.
+///
+/// The summary thumbnail alone was what this used to embed, and it is why a
+/// converted image looked worse than the PNG it came from: 128 pixels
+/// stretched across an 800-point pane is 128 pixels stretched across an
+/// 800-point pane, however good the thumbnail is. So the payload is decoded
+/// when it is cheap enough to decode — an image preview showing the image is
+/// worth one decode — and the page says which of the two it got.
+fn picture(file: &WickFile, path: &Path) -> anyhow::Result<Option<Picture>> {
+    let summary_size = wick_emi::summary_size(file)?;
+    let affordable = match summary_size {
+        Some((w, h)) => (w as u64) * (h as u64) <= DECODE_BUDGET_PIXELS,
+        // No summary tier to ask, so the payload is being read anyway.
+        None => true,
+    };
+
+    if affordable {
+        let raster = wick_emi::image(file).or_else(|_| {
+            // A tiered read stops before DATA on purpose. This is the one
+            // caller that wants it, so ask for the whole file.
+            WickFile::read(path).and_then(|f| wick_emi::image(&f))
+        });
+        if let Ok((img, _)) = raster {
+            let shown = img.thumbnail(DISPLAY_MAX);
+            let scaled = shown.width != img.width;
+            let caption = if scaled {
+                format!(
+                    "{}×{}, drawn from the payload at {}×{}",
+                    img.width, img.height, shown.width, shown.height
+                )
+            } else {
+                format!("{}×{}, drawn from the payload", img.width, img.height)
+            };
+            return Ok(Some(Picture {
+                zoom: zoom_for(shown.width.max(shown.height)),
+                width: shown.width,
+                height: shown.height,
+                png: wick_emi::to_png(&shown)?,
+                caption,
+                decoded: true,
+            }));
+        }
+    }
+
+    // Sealed, truncated, or simply too large to be worth decoding. The
+    // summary tier is exactly the fallback it was designed to be.
+    let Some(png) = wick_emi::thumbnail_png(file)? else {
+        return Ok(None);
+    };
+    let thumb = wick_emi::from_png(&png)?;
+    let caption = match summary_size {
+        Some((w, h)) => format!(
+            "summary thumbnail, {}×{} of {w}×{h} — the payload was not decoded",
+            thumb.width, thumb.height
+        ),
+        None => format!("summary thumbnail, {}×{}", thumb.width, thumb.height),
+    };
+    Ok(Some(Picture {
+        zoom: zoom_for(thumb.width.max(thumb.height)),
+        width: thumb.width,
+        height: thumb.height,
+        png,
+        caption,
+        decoded: false,
+    }))
+}
+
+/// How many times to enlarge a small picture so it is visible in a pane
+/// built for a page of text. Whole numbers only: doubling a 16px icon to
+/// 32px keeps every pixel a square, where 1.7× would smear it.
+fn zoom_for(long_edge: u32) -> u32 {
+    match long_edge {
+        0 => 1,
+        n => (256 / n.max(1)).clamp(1, 8),
+    }
+}
+
+/// `picture` is false for the text preview, which has nowhere to put an
+/// image and should not pay for decoding one.
+fn gather(
+    plugin: &dyn Plugin,
+    path: &Path,
+    opts: &Opts,
+    want_picture: bool,
+) -> anyhow::Result<Preview> {
     let peek = Peek::open(path)?;
 
     let mut note = None;
@@ -88,11 +206,11 @@ fn gather(plugin: &dyn Plugin, path: &Path, opts: &Opts) -> anyhow::Result<Previ
         })
     };
 
-    // The image formats have an actual picture in their summary tier, and a
-    // preview pane that showed a paragraph about an image instead of the
-    // image would be a strange thing to build.
-    let image = if plugin.tag() == wick_emi::TAG {
-        wick_emi::thumbnail_png(&file)?
+    // The image formats have an actual picture to show, and a preview pane
+    // that showed a paragraph about an image instead of the image would be a
+    // strange thing to build.
+    let image = if want_picture && plugin.tag() == wick_emi::TAG {
+        picture(&file, path)?
     } else {
         None
     };
@@ -129,7 +247,7 @@ fn gather(plugin: &dyn Plugin, path: &Path, opts: &Opts) -> anyhow::Result<Previ
 }
 
 pub fn text(plugin: &dyn Plugin, path: &Path, opts: &Opts) -> anyhow::Result<String> {
-    let p = gather(plugin, path, opts)?;
+    let p = gather(plugin, path, opts, false)?;
     let mut s = String::new();
     writeln!(s, "{}  —  .{} ({}), {}", p.name, p.ext, p.format, p.size)?;
     writeln!(
@@ -155,7 +273,7 @@ pub fn text(plugin: &dyn Plugin, path: &Path, opts: &Opts) -> anyhow::Result<Str
 }
 
 pub fn html(plugin: &dyn Plugin, path: &Path, opts: &Opts) -> anyhow::Result<String> {
-    let p = gather(plugin, path, opts)?;
+    let p = gather(plugin, path, opts, true)?;
     let accent = accent(&p.ext);
     let mut s = String::new();
 
@@ -192,25 +310,40 @@ pub fn html(plugin: &dyn Plugin, path: &Path, opts: &Opts) -> anyhow::Result<Str
         writeln!(s, "</ul>")?;
     }
 
+    // Two sources, so two sentences where they disagree. "Read from the
+    // summary tier" stops being true the moment the picture below it came
+    // out of DATA, and a claim about cost that is only sometimes right is
+    // worse than no claim at all.
+    let decoded_picture = p.image.as_ref().is_some_and(|i| i.decoded);
     writeln!(
         s,
         "<p class=\"tier\">{}</p>",
-        if p.tiered {
-            "read from the summary tier — the payload was never decoded"
-        } else {
-            "read from the payload"
+        match (p.tiered, decoded_picture) {
+            (true, false) => "read from the summary tier — the payload was never decoded",
+            (true, true) =>
+                "details read from the summary tier; the picture decoded from the payload",
+            (false, _) => "read from the payload",
         }
     )?;
     if let Some(n) = &p.note {
         writeln!(s, "<p class=\"note\">{}</p>", esc(n))?;
     }
 
-    if let Some(png) = &p.image {
+    if let Some(pic) = &p.image {
+        // width and height are the picture's own, so the pane draws it at
+        // one image pixel per pixel and never stretches it. `max-width` in
+        // the stylesheet still shrinks it to fit a narrow pane, which loses
+        // nothing: scaling down is the direction that keeps detail.
         writeln!(
             s,
-            "<figure><img alt=\"preview\" src=\"data:image/png;base64,{}\"></figure>",
-            base64(png)
+            "<figure><img alt=\"preview\" width=\"{}\" height=\"{}\"{} src=\"data:image/png;base64,{}\">",
+            pic.width * pic.zoom,
+            pic.height * pic.zoom,
+            if pic.zoom > 1 { " class=\"zoomed\"" } else { "" },
+            base64(&pic.png)
         )?;
+        writeln!(s, "  <figcaption>{}</figcaption>", esc(&pic.caption))?;
+        writeln!(s, "</figure>")?;
     }
 
     writeln!(s, "<pre>{}</pre>", esc(p.body.trim_end()))?;
@@ -284,9 +417,14 @@ h1 {{ margin: 0; font-size: 15px; font-weight: 600; word-break: break-all; }}
 .note {{ margin: 3px 0 0; font-size: 11.5px; color: var(--dim); }}
 figure {{ margin: 14px 0 0; }}
 figure img {{
-  max-width: 100%; border: 1px solid var(--line); border-radius: 6px;
-  image-rendering: pixelated; background: var(--panel);
+  max-width: 100%; height: auto;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel);
 }}
+/* Only an enlargement gets nearest-neighbour. At natural size it makes no
+   difference, and on the way down it is the thing that adds the aliasing. */
+figure img.zoomed {{ image-rendering: pixelated; }}
+figcaption {{ margin: 6px 0 0; font-size: 11px; color: var(--dim); }}
 pre {{
   margin: 14px 0 0; padding: 14px 16px; overflow-x: auto;
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px;

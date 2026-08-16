@@ -357,7 +357,10 @@ final class FileWindow: NSObject, NSWindowDelegate, NSTextViewDelegate {
         scroll.borderType = .noBorder
         scroll.drawsBackground = true
 
-        imageView.imageScaling = .scaleProportionallyUpOrDown
+        // Down, never up. Enlarging to fill the window is how a 64px icon
+        // ends up looking like a bad photocopy of itself; an image smaller
+        // than the window is shown at its own size instead.
+        imageView.imageScaling = .scaleProportionallyDown
         imageView.isHidden = true
 
         grid.onEdit = { [weak self] in self?.markDirty() }

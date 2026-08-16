@@ -125,22 +125,78 @@ impl Image {
         self.height.div_ceil(tile)
     }
 
-    /// Nearest-neighbour box downsample. Good enough for a thumbnail and
-    /// dependency-free; nothing here is trying to be an image editor.
+    /// Downsample by averaging whole source rectangles, in linear light.
+    ///
+    /// The obvious implementation takes the nearest source pixel for each
+    /// destination pixel. That was here first, and it is why thumbnails
+    /// looked worse than the images they came from: shrinking 1024px to
+    /// 128px keeps one pixel in sixty-four and discards the other
+    /// sixty-three, so text and fine detail come back as aliased speckle,
+    /// which whatever displays it then smooths into blur. Averaging the
+    /// whole rectangle keeps that detail as tone.
+    ///
+    /// Two details are easy to get wrong and visible when they are:
+    ///
+    /// * The average is taken in linear light. sRGB bytes lie along a curve,
+    ///   so averaging them directly darkens every edge — black and white in
+    ///   equal measure average to 128, a good deal darker than the grey a
+    ///   squint actually sees.
+    /// * Colour is weighted by alpha, so a fully transparent pixel cannot
+    ///   drag whatever colour it happens to carry into the average and leave
+    ///   a fringe around a cut-out.
+    ///
+    /// Source rectangles are laid out in integer arithmetic, so they tile the
+    /// image exactly at any ratio: every pixel is counted once.
     pub fn thumbnail(&self, max_edge: u32) -> Image {
-        let scale = (self.width.max(self.height) as f64 / max_edge as f64).max(1.0);
-        let w = ((self.width as f64 / scale).round() as u32).max(1);
-        let h = ((self.height as f64 / scale).round() as u32).max(1);
+        let long = self.width.max(self.height);
+        if max_edge == 0 || long <= max_edge {
+            // Not a downsample. Copying is not merely the faster path, it is
+            // the only one that guarantees the bytes are unchanged: a round
+            // trip out to linear light and back moves some of them by one.
+            return self.clone();
+        }
+        let span = |i: u32, n_out: u32, n_in: u32| -> (u32, u32) {
+            let lo = (i as u64 * n_in as u64 / n_out as u64) as u32;
+            let hi = (((i as u64 + 1) * n_in as u64 / n_out as u64) as u32).max(lo + 1);
+            (lo, hi)
+        };
+
+        let w = ((self.width as u64 * max_edge as u64 / long as u64) as u32).max(1);
+        let h = ((self.height as u64 * max_edge as u64 / long as u64) as u32).max(1);
+        let linear = srgb_to_linear();
         let mut out = Image::new(w, h);
+
         for y in 0..h {
+            let (y0, y1) = span(y, h, self.height);
             for x in 0..w {
-                let sx = ((x as f64 + 0.5) * scale) as u32;
-                let sy = ((y as f64 + 0.5) * scale) as u32;
-                out.set_pixel(
-                    x,
-                    y,
-                    self.pixel(sx.min(self.width - 1), sy.min(self.height - 1)),
-                );
+                let (x0, x1) = span(x, w, self.width);
+                let (mut r, mut g, mut b, mut a) = (0f32, 0f32, 0f32, 0f32);
+                for sy in y0..y1 {
+                    let row = (sy as usize) * (self.width as usize);
+                    for sx in x0..x1 {
+                        let i = (row + sx as usize) * 4;
+                        let p = &self.pixels[i..i + 4];
+                        let weight = p[3] as f32 / 255.0;
+                        r += linear[p[0] as usize] * weight;
+                        g += linear[p[1] as usize] * weight;
+                        b += linear[p[2] as usize] * weight;
+                        a += weight;
+                    }
+                }
+                let count = ((x1 - x0) as f32) * ((y1 - y0) as f32);
+                let px = if a > 0.0 {
+                    [
+                        linear_to_srgb(r / a),
+                        linear_to_srgb(g / a),
+                        linear_to_srgb(b / a),
+                        ((a / count) * 255.0).round() as u8,
+                    ]
+                } else {
+                    // Every contributing pixel was transparent, so there is
+                    // no colour to keep and nothing to average.
+                    [0, 0, 0, 0]
+                };
+                out.set_pixel(x, y, px);
             }
         }
         out
@@ -161,6 +217,35 @@ impl Image {
         v.truncate(n);
         v
     }
+}
+
+/// sRGB byte to linear intensity, one entry per possible byte. A table
+/// because the alternative is a `powf` per channel per source pixel, and a
+/// thumbnail of a large image reads every one of them.
+fn srgb_to_linear() -> &'static [f32; 256] {
+    static TABLE: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut t = [0f32; 256];
+        for (i, v) in t.iter_mut().enumerate() {
+            let c = i as f32 / 255.0;
+            *v = if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            };
+        }
+        t
+    })
+}
+
+fn linear_to_srgb(v: f32) -> u8 {
+    let c = v.clamp(0.0, 1.0);
+    let s = if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (s * 255.0).round() as u8
 }
 
 // ---------------------------------------------------------------------------
@@ -753,6 +838,24 @@ pub fn thumbnail_png(file: &WickFile) -> Result<Option<Vec<u8>>> {
         .and_then(|s| s.get(THMB).map(|c| c.value.clone())))
 }
 
+/// The image's dimensions as recorded in `SUMM`, without decoding `DATA`.
+///
+/// Enough for a caller to decide whether decoding the payload is worth it
+/// before it commits to doing so, which is the whole point of the tier.
+pub fn summary_size(file: &WickFile) -> Result<Option<(u32, u32)>> {
+    let Some(summ) = file.summary()? else {
+        return Ok(None);
+    };
+    let Some(stat) = summ.get(STAT) else {
+        return Ok(None);
+    };
+    let v: serde_json::Value = stat.as_json()?;
+    match (v["width"].as_u64(), v["height"].as_u64()) {
+        (Some(w), Some(h)) => Ok(Some((w as u32, h as u32))),
+        _ => Ok(None),
+    }
+}
+
 /// Attach a vector overlay. Stored and preserved; not rasterised by this
 /// build.
 pub fn set_vector_layer(file: &mut WickFile, svg: &str) -> Result<()> {
@@ -953,6 +1056,50 @@ mod tests {
         let decoded = from_png(&thumb).unwrap();
         assert!(decoded.width <= THUMB_MAX && decoded.height <= THUMB_MAX);
         assert_eq!(decoded.width, THUMB_MAX);
+    }
+
+    #[test]
+    fn a_thumbnail_averages_its_pixels_instead_of_picking_one() {
+        // A checkerboard is the case nearest-neighbour gets worst: whichever
+        // pixel it lands on, the answer is pure black or pure white and the
+        // other half of the image is gone.
+        let mut img = Image::new(64, 64);
+        for y in 0..64 {
+            for x in 0..64 {
+                let v = if (x + y) % 2 == 0 { 255 } else { 0 };
+                img.set_pixel(x, y, [v, v, v, 255]);
+            }
+        }
+        let t = img.thumbnail(1);
+        let [r, g, b, a] = t.pixel(0, 0);
+        assert_eq!((t.width, t.height, a), (1, 1, 255));
+        assert_eq!([r, g, b], [r, r, r]);
+        // Averaged in linear light, half black and half white is sRGB 188,
+        // not the 128 that averaging the bytes directly would give. 128 here
+        // would mean the gamma correction had been dropped.
+        assert!((186..=190).contains(&r), "half-and-half grey came out {r}");
+    }
+
+    #[test]
+    fn a_thumbnail_no_smaller_than_the_image_is_the_image() {
+        let img = gradient(40, 30);
+        assert_eq!(img.thumbnail(40), img);
+        assert_eq!(img.thumbnail(400), img);
+    }
+
+    #[test]
+    fn transparent_pixels_do_not_tint_the_ones_beside_them() {
+        // Two pixels: opaque blue, and red that is not there at all. The red
+        // is invisible, so the average is blue at half alpha. Weighting the
+        // colours by alpha is what keeps the red out; without it the result
+        // is a muddy purple, which is the fringe you see around a badly
+        // scaled cut-out.
+        let mut img = Image::new(2, 1);
+        img.set_pixel(0, 0, [0, 0, 255, 255]);
+        img.set_pixel(1, 0, [255, 0, 0, 0]);
+        let [r, g, b, a] = img.thumbnail(1).pixel(0, 0);
+        assert_eq!((r, g, b), (0, 0, 255));
+        assert!((126..=129).contains(&a), "alpha came out {a}");
     }
 
     #[test]

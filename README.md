@@ -528,9 +528,12 @@ are accepted, and whether a saved table is the table that was loaded.
 is this" about a file the user may never open, answered without decoding a
 payload. The extension is a thin shell around `hearth preview`, so the pane
 and the terminal show the same thing and either can be debugged from the
-other. A `.emi` preview carries its thumbnail with it — a Quick Look
-extension is sandboxed and cannot fetch anything, so the image is embedded in
-the page.
+other. A `.emi` preview carries its picture with it — a Quick Look extension
+is sandboxed and cannot fetch anything, so the image is embedded in the page,
+and it is the raster itself rather than the summary thumbnail. That one
+decode is the exception to the paragraph above, and the page says so: a
+thumbnail stretched to fill a pane is a blurry answer to a question the file
+can answer sharply.
 
 The three parts of this that are not obvious, all of them learned by watching
 it fail:

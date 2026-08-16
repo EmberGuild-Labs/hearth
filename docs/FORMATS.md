@@ -168,8 +168,19 @@ own hash:
   decoding the tiles that match.
 * **A cheap preview.** Thumbnail and palette live in `SUMM`, so a browser
   showing a directory of images reads a few kilobytes per file instead of
-  decoding megapixels. `hearth thumbnail` never touches `DATA`, and neither
-  does the macOS Quick Look preview, which embeds that same thumbnail.
+  decoding megapixels. `hearth thumbnail` never touches `DATA`.
+
+  `hearth preview` is the deliberate exception. A 128px thumbnail stretched
+  across a Quick Look pane looks worse than the PNG the file was converted
+  from, and a preview of a picture that shows a blurred copy of the picture
+  is not answering the question. So the preview decodes the raster and draws
+  it at its own size, up to 1600px on the long edge; past 40 megapixels it
+  falls back to the thumbnail. Either way the page says which one it drew.
+
+  The thumbnail itself is an area average taken in linear light, not a
+  nearest-neighbour sample: shrinking 1024px to 128px keeps one pixel in
+  sixty-four, and averaging the other sixty-three in is the difference
+  between a small picture and a speckled one.
 
 A new one needs its dimensions — `hearth create canvas.emi --size 640x480`
 gives a transparent canvas — because an image has no natural empty state and
