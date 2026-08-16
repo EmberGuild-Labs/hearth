@@ -191,14 +191,16 @@ every default size would be somebody's wrong one.
 ```
 DATA
 ├── IMHD   JSON: width, height, tile size, source, opaque
-├── TILE × n   [tx u16][ty u16][w u16][h u16][RGBA8 rows]
+├── TILE × n   [tx u16][ty u16][w u16][h u16][filter u8][rows]
 ├── VECT   an SVG overlay   (optional, stored and preserved)
 └── EDIT × n   JSON edit-history notes   (optional)
 
 SUMM
 ├── STAT   dimensions, megapixels, tile count
 ├── PALT   the eight most common colours and their shares
-└── THMB   a real PNG thumbnail, at most 128px on its long edge
+└── THMB   a real PNG thumbnail, at most 128px on its long edge and never
+           more than a third of the source's — a 160px image would
+           otherwise carry a near-copy of itself
 ```
 
 Validation checks that the tile grid covers the image exactly once — a gap or a
@@ -207,14 +209,38 @@ is precisely the quiet corruption worth refusing.
 
 ### The trade
 
-Pixels are stored as raw RGBA and compressed by the chunk layer, rather than as
-PNG per tile. Raw because the container already compresses, and because a tile
-stored decoded can be patched without a decode-modify-re-encode cycle.
+Pixels are stored as RGBA and compressed by the chunk layer, rather than as PNG
+per tile: the container already compresses, and a tile stored as pixels can be
+patched without a decode-modify-re-encode cycle.
 
-The cost: on photographic content `.emi` lands within a few percent of the
-equivalent PNG rather than beating it. On a synthetic 640×480 photo, 956 KB of
-PNG becomes 921 KB — a 4% saving that is essentially noise. That is a real
-trade, and it buys everything above.
+Each tile's bytes are delta-filtered before that, with PNG's Paeth predictor.
+The filter is chosen per tile — filtered or not, whichever is smaller once the
+chunk layer has had it, asked of `libwick::chunks::stored_size` so the answer
+comes from the code that will do the compressing. Flat artwork is already long
+runs of identical bytes and prefers to be left alone; a photograph does not
+repeat, it drifts, and needs the prediction. The stored byte says which, and a
+tile written before the byte existed is one shorter, which is how a reader
+tells them apart.
+
+Measured against the source PNG, before this and after it:
+
+| Source | PNG | Was | Now |
+|---|---:|---:|---:|
+| 1600×843 photograph | 1,827,670 | +41% | **+1%** |
+| 300×200 swatch (`examples/swatch.png`) | 11,276 | +60% | **−80%** |
+| 160×84 photograph | 24,989 | +123% | **+28%** |
+| 1024×1024 icon | 16,112 | −27% | −26% |
+| 640×480 of random pixels | 923,414 | +18% | +17% |
+
+The icon loses a byte per tile to the filter byte and the noise is
+incompressible by construction — neither is a case a predictor can help, and
+neither is made worse than the byte it costs.
+
+The remaining cost is structural and is not going away: a tile is compressed
+alone, so `.emi` never gets the cross-image context a single PNG stream does,
+and a small image still pays the container's fixed floor of schema, provenance
+and summary. That is the price of a payload which can be patched and diffed
+one region at a time.
 
 ### What it does not do
 

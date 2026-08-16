@@ -567,7 +567,13 @@ provenance chain and summary tier; the legacy files include none of that.
 | 322 B of JSON config | 322 B | — | 725 B | **+125%** | — |
 | 13 KB of JSON config | 13,156 | 1,386 | 3,271 | −75% | +136% |
 | 542 KB CSV, 20k rows | 542,335 | 168,875 | 107,059 | −80% | **−37%** |
-| 956 KB PNG photo | 955,903 | — | 921,331 | −4% | — |
+| 11 KB PNG swatch | 11,276 | — | 2,217 | **−80%** | — |
+| 1.8 MB PNG photograph | 1,827,670 | — | 1,859,322 | +2% | — |
+
+The two image rows replace a single "956 KB synthetic photo" measured before
+tiles were delta-filtered, whose input is not in the repository and so could
+not be re-run. The swatch is [`examples/swatch.png`](examples/swatch.png), so
+that row can be.
 
 ### Where this costs you
 
@@ -581,9 +587,12 @@ properties, this format is not for you.
 path, which is verbose — and is exactly what makes the diff readable. That is
 the trade, taken deliberately.
 
-**Images barely shrink.** `.emi` stores raw pixels and lets the container
-compress them, which lands within a few percent of PNG. It buys tile-level
-patching and a diff that says *where*, not a smaller file.
+**Images are about the size of the PNG, either way.** `.emi` stores pixels,
+delta-filters each tile and lets the container compress it, which lands
+anywhere from 80% smaller on flat artwork to a few percent larger on a
+photograph. What it never gets is the cross-image context a single PNG stream
+has, because a tile is compressed alone — which is exactly what buys
+tile-level patching and a diff that says *where*.
 
 **Tables genuinely win.** Column-major row groups give zstd a column of similar
 values to work with, which is why `.emx` beats `gzip -9` by 37% on a real

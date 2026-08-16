@@ -180,6 +180,35 @@ impl Run {
 
 /// A small PNG with a gradient, written without any image dependency.
 fn gradient_png(w: u32, h: u32) -> Vec<u8> {
+    png_of(w, h, |x, y| {
+        [
+            (x * 255 / w.max(1)) as u8,
+            (y * 255 / h.max(1)) as u8,
+            ((x + y) * 255 / (w + h).max(1)) as u8,
+            255,
+        ]
+    })
+}
+
+/// A PNG of pseudo-random pixels. Where a gradient is the easiest thing in
+/// the world to compress — `.emi` tiles are delta-filtered, so a gradient's
+/// payload nearly vanishes — this is the hardest, which is what a test about
+/// the size of one part of a file relative to another needs.
+fn noise_png(w: u32, h: u32) -> Vec<u8> {
+    png_of(w, h, |x, y| {
+        let mut s = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (y as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s as u8
+        };
+        [next(), next(), next(), 255]
+    })
+}
+
+fn png_of(w: u32, h: u32, pixel: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
     fn crc(bytes: &[u8]) -> u32 {
         let mut table = [0u32; 256];
         for (i, e) in table.iter_mut().enumerate() {
@@ -213,12 +242,7 @@ fn gradient_png(w: u32, h: u32) -> Vec<u8> {
     for y in 0..h {
         raw.push(0u8);
         for x in 0..w {
-            raw.extend_from_slice(&[
-                (x * 255 / w.max(1)) as u8,
-                (y * 255 / h.max(1)) as u8,
-                ((x + y) * 255 / (w + h).max(1)) as u8,
-                255,
-            ]);
+            raw.extend_from_slice(&pixel(x, y));
         }
     }
 
@@ -747,7 +771,10 @@ fn a_pinned_document_renders_identically_every_time() {
 #[test]
 fn a_thumbnail_comes_from_the_summary_tier() {
     let s = Sandbox::new("thumb");
-    std::fs::write(s.path("swatch.png"), gradient_png(300, 200)).unwrap();
+    // Big enough for the point to hold: the thumbnail's long edge is capped
+    // at 128px whatever the image is, so what the tier saves grows with the
+    // picture. On a small one it saves little and is not worth asserting.
+    std::fs::write(s.path("swatch.png"), noise_png(600, 400)).unwrap();
     s.run(&["convert", "swatch.png"]).ok();
     s.run(&["thumbnail", "swatch.emi"])
         .ok()

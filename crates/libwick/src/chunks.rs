@@ -120,6 +120,27 @@ const ZSTD_LEVEL: i32 = 12;
 /// finding structure.
 const INDEPENDENT_CHILD: usize = 4096;
 
+/// What `value` will cost once this layer has stored it.
+///
+/// Exists for the one question a format plugin legitimately has about the
+/// container: given two encodings of the same data — a tile's pixels raw and
+/// the same tile delta-filtered — which one ends up smaller? The plugin
+/// cannot answer that itself without hard-coding the codec and its level,
+/// which is precisely the knowledge the spine is supposed to own. So it asks.
+///
+/// The answer is exact for the codec, and ignores the few bytes of chunk
+/// framing around it, which are the same either way.
+pub fn stored_size(value: &[u8]) -> usize {
+    if value.len() < COMPRESS_THRESHOLD {
+        return value.len();
+    }
+    zstd::encode_all(value, ZSTD_LEVEL)
+        .map(|v| v.len())
+        // A compressor that will not run is not a reason to fail a caller
+        // asking a question about size. Raw is the honest upper bound.
+        .unwrap_or(value.len())
+}
+
 /// How a chunk's value is stored. Kept alongside the decoded value so that
 /// reading a file and writing it back preserves the author's intent instead
 /// of silently decompressing or, worse, decrypting everything.
